@@ -27,10 +27,21 @@ if ($user_id <= 0) {
     exit;
 }
 
-if (empty($approved_role) || !in_array($approved_role, ['criminology_student', 'faculty_researcher', 'alumni_police_partner', 'super_admin'])) {
+// Whitelist mapping for role validation (prevents role injection)
+$allowed_roles = [
+    'criminology_student' => 'criminology_student',
+    'faculty_researcher' => 'faculty_researcher',
+    'alumni_police_partner' => 'alumni_police_partner',
+    'super_admin' => 'super_admin'
+];
+
+if (empty($approved_role) || !isset($allowed_roles[$approved_role])) {
     echo json_encode(['success' => false, 'message' => 'Invalid role selected.']);
     exit;
 }
+
+// Use safe role from whitelist
+$safe_role = $allowed_roles[$approved_role];
 
 try {
     // Check if user exists and is pending
@@ -44,16 +55,16 @@ try {
     }
 
     $stmt = $pdo->prepare("UPDATE users SET status = 'active', role = ? WHERE id = ?");
-    $stmt->execute([$approved_role, $user_id]);
+    $stmt->execute([$safe_role, $user_id]);
 
-    log_activity("Approve User", "Approved user registration for $email (assigned role: $approved_role)");
+    log_activity("Approve User", "Approved user registration for $email (assigned role: $safe_role)");
 
     echo json_encode([
         'success' => true,
         'message' => 'User account approved and role assigned successfully.',
         'data' => [
             'user_id' => $user_id,
-            'role' => $approved_role,
+            'role' => $safe_role,
             'email' => $email
         ]
     ]);
@@ -61,3 +72,4 @@ try {
     echo json_encode(['success' => false, 'message' => 'Database error: ' . $e->getMessage()]);
 }
 exit;
+
