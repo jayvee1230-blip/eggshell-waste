@@ -5,6 +5,25 @@ header('Content-Type: application/json');
 
 require_once dirname(__DIR__) . "/config.php";
 
+// Enhanced logging function that works in production
+function log_api_error($message, $context = [])
+{
+    $logFile = dirname(__DIR__) . '/logs/gemini_api.log';
+    $logDir = dirname($logFile);
+    
+    // Create logs directory if it doesn't exist
+    if (!is_dir($logDir)) {
+        @mkdir($logDir, 0755, true);
+    }
+    
+    $timestamp = date('Y-m-d H:i:s');
+    $contextStr = !empty($context) ? ' | ' . json_encode($context) : '';
+    $logEntry = "[$timestamp] $message$contextStr\n";
+    
+    @file_put_contents($logFile, $logEntry, FILE_APPEND);
+    error_log($logEntry);
+}
+
 // Helper function to safely output JSON and exit
 function send_response($success, $reply, $source = 'offline', $http_code = 200)
 {
@@ -15,14 +34,15 @@ function send_response($success, $reply, $source = 'offline', $http_code = 200)
     echo json_encode([
         "success" => $success,
         "reply" => $reply,
-        "source" => $source
+        "source" => $source,
+        "timestamp" => date('Y-m-d H:i:s')
     ]);
     exit;
 }
 
 // Ensure request is POST
 if ($_SERVER["REQUEST_METHOD"] !== "POST") {
-    send_response(false, "Method Not Allowed", 405);
+    send_response(false, "Method Not Allowed", "error", 405);
 }
 
 // Read JSON input
@@ -30,8 +50,10 @@ $input = json_decode(file_get_contents('php://input'), true);
 $message = trim($input['message'] ?? '');
 
 if (empty($message)) {
-    send_response(false, "Message cannot be empty.", 400);
+    send_response(false, "Message cannot be empty.", "error", 400);
 }
+
+log_api_error("New support request received", ["message_length" => strlen($message)]);
 
 // 1. Password Security & Account Unlock Check
 $lowerMessage = strtolower($message);
@@ -58,6 +80,7 @@ foreach ($unlockKeywords as $keyword) {
 }
 
 if ($matchedUnlock) {
+    log_api_error("Unlock request detected - returning offline response");
     send_response(
         true,
         "If your account is locked after multiple failed login attempts, you may wait 15 minutes or submit an unlock request for Super Admin review. Open the Request Unlock page here: request_unlock.php",
@@ -67,6 +90,7 @@ if ($matchedUnlock) {
 
 // Fallback password warning
 if (strpos($lowerMessage, 'password') !== false || strpos($lowerMessage, 'passcode') !== false || strpos($lowerMessage, 'credential') !== false) {
+    log_api_error("Password-related query detected - returning offline response");
     send_response(
         true,
         "For security reasons, never share your password. If you need help with your password or your account is locked, please use the Request Unlock page or contact the Super Administrator directly.",
@@ -92,27 +116,12 @@ foreach ($developerKeywords as $keyword) {
 }
 
 if ($matchedDeveloper) {
+    log_api_error("Developer query detected - returning offline response");
     send_response(
         true,
         "Ang developer nitong system ay si Yvez Jayvee Gesmundo ang full stock developer. ang frontend ay si Marron Brimbuela at si Kevin Cloud Fajardo.",
         "offline"
     );
-}
-
-
-// Helper for local diagnostic logging
-function debug_log($message, $is_error = false)
-{
-    $env = env('APP_ENV', 'production');
-    $isLocalDev = ($env === 'local' || $env === 'development');
-    if ($isLocalDev) {
-        $file = dirname(__DIR__) . '/debug_log.txt';
-        $timestamp = date('Y-m-d H:i:s');
-        file_put_contents($file, "[$timestamp] $message\n", FILE_APPEND);
-        if ($is_error) {
-            error_log($message);
-        }
-    }
 }
 
 // Offline fallback responder for common Green Forensics questions
@@ -207,18 +216,18 @@ function getOfflineSupportAnswer($message)
 // 2. Fetch Gemini API Key
 $apiKey = env('GEMINI_API_KEY');
 if (empty($apiKey)) {
-    $err = "Gemini API Error: GEMINI_API_KEY is not defined or empty in the environment configuration.";
-    debug_log($err, true);
+    $err = "GEMINI_API_KEY is not defined or empty in environment configuration";
+    log_api_error($err);
     $reply = getOfflineSupportAnswer($message);
     send_response(true, $reply, "offline");
 }
 
 // 3. Fetch Gemini Model (non-hardcoded)
-$model = env('GEMINI_MODEL', 'gemini-3.5-flash');
-debug_log("Attempting call with Model: $model");
+$model = env('GEMINI_MODEL', 'gemini-2.0-flash');
+log_api_error("Attempting Gemini API call", ["model" => $model]);
 
 // 4. Call Google Gemini API
-$url = "https://generativelanguage.googleapis.com/v1beta/models/" . $model . ":generateContent?key=" . $apiKey;
+$url = "https://generativelanguage.googleapis.com/v1beta/models/" . urlencode($model) . ":generateContent?key=" . urlencode($apiKey);
 
 $systemInstruction = "You are the Green Forensics Support Assistant. Help users with the Green Forensics Evaluating System. Answer clearly, politely, and briefly. You can help with registration, pending accounts, login lockout, account unlock requests, fingerprint image upload, webcam capture, AI-assisted image quality evaluation, faculty validation, Terms of Use, Privacy Policy, and role-based dashboards. For account lockouts, password resets, failed logins, or unlock requests, guide the user to visit request_unlock.php. Do not ask for their password or private credentials. Fingerprint images are used only for academic research evaluation and image quality assessment, not biometric identification. If a user asks about locked account, login failed, forgot password, cannot login, or requesting an unlock, you must respond with: 'If your account is locked after multiple failed login attempts, you may wait 15 minutes or submit an unlock request for Super Admin review. Open the Request Unlock page here: request_unlock.php'. If a user asks who the developer of the system is, respond with: 'Ang developer nitong system ay si Yvez Jayvee Gesmundo ang full stock developer. ang frontend ay si Marron Brimbuela at si Kevin Cloud Fajardo.' If the user greets you, respond warmly and ask how you can help.";
 
@@ -237,10 +246,7 @@ $data = [
     ],
     "generationConfig" => [
         "temperature" => 0.4,
-        "maxOutputTokens" => 800,
-        "thinkingConfig" => [
-            "thinkingLevel" => "minimal"
-        ]
+        "maxOutputTokens" => 800
     ]
 ];
 
@@ -251,37 +257,70 @@ curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($data));
 curl_setopt($ch, CURLOPT_HTTPHEADER, [
     'Content-Type: application/json'
 ]);
-curl_setopt($ch, CURLOPT_TIMEOUT, 10);
+curl_setopt($ch, CURLOPT_TIMEOUT, 15);
+curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 10);
 
-// Disable SSL verification locally if XAMPP setup lacks certificates
+// Disable SSL verification locally if needed
 if (env('APP_ENV') !== 'production') {
     curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
     curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
-    debug_log("Local environment detected. Disabled cURL SSL verification.");
 }
 
 $response = curl_exec($ch);
 $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
 $curlError = curl_error($ch);
+$curlErrno = curl_errno($ch);
 curl_close($ch);
+
+// Log the API call result
+log_api_error("Gemini API response received", [
+    "http_code" => $httpCode,
+    "curl_error" => $curlError,
+    "curl_errno" => $curlErrno,
+    "response_length" => strlen($response ?? '')
+]);
 
 // If request fails or API returns error response code
 if ($response === false || $httpCode !== 200) {
-    $errMessage = "Gemini API Error. HTTP Code: $httpCode. cURL Error: $curlError. Response: " . ($response !== false ? $response : 'No response');
-    debug_log($errMessage, true);
+    $errMessage = "Gemini API call failed";
+    $context = [
+        "http_code" => $httpCode,
+        "curl_error" => $curlError,
+        "curl_errno" => $curlErrno
+    ];
+    
+    if ($response !== false) {
+        $context["response_preview"] = substr($response, 0, 500);
+    }
+    
+    log_api_error($errMessage, $context);
     $reply = getOfflineSupportAnswer($message);
     send_response(true, $reply, "offline");
 }
 
 $responseData = json_decode($response, true);
-$replyText = $responseData['candidates'][0]['content']['parts'][0]['text'] ?? '';
 
-if (empty($replyText)) {
-    $errMessage = "Gemini API Error: empty response text structure. Response: " . $response;
-    debug_log($errMessage, true);
+// Check for API error in response
+if (isset($responseData['error'])) {
+    log_api_error("Gemini API returned error", [
+        "error_code" => $responseData['error']['code'] ?? 'unknown',
+        "error_message" => $responseData['error']['message'] ?? 'unknown'
+    ]);
     $reply = getOfflineSupportAnswer($message);
     send_response(true, $reply, "offline");
 }
 
+$replyText = $responseData['candidates'][0]['content']['parts'][0]['text'] ?? '';
+
+if (empty($replyText)) {
+    log_api_error("Gemini API returned empty response text", [
+        "response_structure" => json_encode($responseData)
+    ]);
+    $reply = getOfflineSupportAnswer($message);
+    send_response(true, $reply, "offline");
+}
+
+log_api_error("Gemini API call successful", ["reply_length" => strlen($replyText)]);
 send_response(true, trim($replyText), "gemini");
 ?>
+
